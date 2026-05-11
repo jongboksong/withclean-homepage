@@ -10,6 +10,7 @@ const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, 
 
 const PHONE = "010-5637-1716";
 const REGIONS = "서울 · 경기 · 인천";
+const BUILDING_TYPES = ["아파트", "원룸", "오피스텔", "상가", "사무실", "공장", "단독주택", "빌라"];
 
 const initialServices = [
   { id: "move-in", slug: "move-in", icon: "⌂", title: "이사/입주 청소", price: "가격 추후 입력", desc: "새로운 시작을 깨끗하게 준비합니다.", detail: "공사 먼지, 창틀, 주방, 욕실, 바닥, 수납장 내부까지 입주 전 필요한 공간을 꼼꼼히 정리합니다." },
@@ -193,7 +194,7 @@ function EstimateForm({ compact = false, services = initialServices, onAddConsul
         </Select>
         <Select value={form.building} onChange={(e) => setForm({ ...form, building: e.target.value })}>
           <option value="">건물 유형 *</option>
-          {["아파트", "원룸", "오피스텔", "상가", "단독주택", "빌라"].map((value) => <option key={value}>{value}</option>)}
+          {BUILDING_TYPES.map((value) => <option key={value}>{value}</option>)}
         </Select>
         <Input placeholder="분양 평수 *" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })} />
         <label className="grid gap-2 text-sm font-bold text-slate-700">청소희망날짜 *<Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></label>
@@ -376,11 +377,216 @@ function AdminPage({ currentAdmin, rows, setRows, leaderRows, setLeaderRows, rev
   return <section className="min-h-screen bg-slate-100"><div className="mx-auto grid max-w-7xl gap-6 px-5 py-8 lg:grid-cols-[260px_1fr]"><aside className="rounded-[2rem] bg-slate-950 p-5 text-white"><button onClick={() => setTab(firstAllowedTab(currentAdmin))}><Logo dark /></button><div className="mt-6 rounded-2xl bg-white/10 p-4 text-sm"><div className="font-black">{currentAdmin.name}</div><div className="mt-1 text-slate-300">{roleLabels[currentAdmin.role] || currentAdmin.role}</div>{currentAdmin.leaderName && <div className="mt-1 text-xs text-blue-200">연결 팀장: {currentAdmin.leaderName}</div>}</div><div className="mt-6 grid gap-2">{tabs.map(([key, label]) => <button key={key} onClick={() => setTab(key)} className={"rounded-2xl px-4 py-3 text-left font-bold " + (tab === key ? "bg-blue-600" : "text-slate-300 hover:bg-white/10")}>{label}</button>)}</div><button onClick={onLogout} className="mt-8 text-sm text-slate-400">관리자 로그아웃</button></aside><main>{tab === "dashboard" && <AdminDashboard rows={rows} onFilter={(filter) => { setConsultFilter(filter); setTab("consult"); }} />}{tab === "consult" && <ConsultAdmin rows={rows} setRows={setRows} leaders={leaderRows} filterStatus={consultFilter} onClearFilter={() => setConsultFilter("all")} />}{tab === "leaders" && <LeadersAdmin leaders={leaderRows} setLeaders={setLeaderRows} onViewSchedule={(leader) => { setSelectedLeader(leader); setTab("calendar"); }} />}{tab === "reviews" && <ReviewsAdmin reviews={reviews} setReviews={setReviews} services={services} readOnly={!hasPermission(currentAdmin, "reviews")} />}{tab === "calendar" && <CalendarAdmin rows={rows} setRows={setRows} leaders={leaderRows} selectedLeader={forcedLeader} onClearLeader={() => setSelectedLeader(null)} readOnly={currentAdmin.role === "leader"} />}{tab === "settings" && <SettingsAdmin services={services} setServices={setServices} />}{tab === "accounts" && <AccountsAdmin accounts={accounts} setAccounts={setAccounts} leaders={leaderRows} />}</main></div></section>;
 }
 function Footer({ setPage }) { return <footer className="bg-slate-950 px-5 py-12 text-white"><div className="mx-auto flex max-w-7xl flex-col justify-between gap-8 md:flex-row"><div><button onClick={() => setPage("home")}><Logo dark /></button><p className="mt-4 text-slate-400">위드크린 | 서비스 지역: {REGIONS}</p></div><div className="space-y-2 text-slate-300"><p className="font-black text-white">고객센터</p><p>{PHONE}</p><p>상담시간 09:00 - 18:00</p><button onClick={() => setPage("admin")} className="mt-4 rounded-xl border border-slate-700 px-4 py-2 text-sm font-bold text-slate-300">관리자 페이지</button></div></div></footer>; }
+
+function CustomerAppPage({ services, onAddConsultation, setPage }) {
+  const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState({ name: "", phone: "" });
+  const [form, setForm] = useState({ service: "", building: "", size: "", date: "", name: "", phone: "", address: "", memo: "" });
+  const [myRows, setMyRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [notice, setNotice] = useState(!supabase ? "Supabase 연결이 필요합니다." : "");
+
+  const user = session?.user || null;
+  const canSubmit = useMemo(() => form.service && form.building && form.size && form.date && form.name && form.phone && form.address, [form]);
+
+  async function loadMyRows(activeSession = session) {
+    if (!supabase || !activeSession?.user?.id) return;
+    const { data, error } = await supabase
+      .from("consultations")
+      .select("*")
+      .eq("user_id", activeSession.user.id)
+      .order("created_at", { ascending: false });
+    if (error) {
+      setNotice("내 신청 내역을 불러오려면 consultations 테이블에 user_id 컬럼이 필요합니다.");
+      return;
+    }
+    setNotice("");
+    setMyRows((data || []).map(toConsultation));
+  }
+
+  async function ensureProfile(activeSession) {
+    if (!supabase || !activeSession?.user) return;
+    const metadata = activeSession.user.user_metadata || {};
+    const nextProfile = {
+      name: metadata.full_name || metadata.name || metadata.nickname || "",
+      phone: metadata.phone || ""
+    };
+    setProfile(nextProfile);
+    setForm((prev) => ({ ...prev, name: prev.name || nextProfile.name, phone: prev.phone || nextProfile.phone }));
+    await supabase.from("user_profiles").upsert({
+      id: activeSession.user.id,
+      name: nextProfile.name,
+      phone: nextProfile.phone,
+      role: "customer"
+    }).then(({ error }) => {
+      if (error) setNotice("user_profiles 테이블이 없으면 프로필 저장은 건너뜁니다.");
+    });
+  }
+
+  useEffect(() => {
+    if (!supabase) return;
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session || null);
+      if (data.session) {
+        ensureProfile(data.session);
+        loadMyRows(data.session);
+      }
+    });
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession || null);
+      if (nextSession) {
+        ensureProfile(nextSession);
+        loadMyRows(nextSession);
+      } else {
+        setMyRows([]);
+      }
+    });
+    return () => authListener?.subscription?.unsubscribe?.();
+  }, []);
+
+  async function signIn(provider) {
+    if (!supabase) return alert("Supabase 환경변수를 먼저 설정해주세요.");
+    const redirectTo = window.location.origin + "/app";
+    const { error } = await supabase.auth.signInWithOAuth({ provider, options: { redirectTo } });
+    if (error) alert("로그인 연결 실패: " + dbError(error));
+  }
+
+  async function signOut() {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setSession(null);
+    setMyRows([]);
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!user) return alert("로그인 후 신청할 수 있습니다.");
+    if (!canSubmit) return alert("필수 항목을 입력해주세요.");
+    const memo = form.building + " / " + form.size + (form.memo ? " / " + form.memo : "");
+    const localRow = { id: Date.now(), name: form.name, phone: form.phone, service: form.service, address: form.address, date: form.date, status: "대기", payment: "미입금", leader: "미배정", memo };
+    setLoading(true);
+    const payload = {
+      user_id: user.id,
+      customer_email: user.email || "",
+      customer_name: form.name,
+      phone: form.phone,
+      cleaning_type: form.service,
+      address: form.address,
+      date: form.date,
+      message: memo,
+      status: "대기",
+      payment: "미입금",
+      leader: "미배정"
+    };
+    const { data, error } = await supabase.from("consultations").insert([payload]).select().single();
+    setLoading(false);
+    if (error) return alert("저장 실패: " + dbError(error));
+    const saved = data ? toConsultation(data) : localRow;
+    setMyRows((prev) => [saved, ...prev]);
+    onAddConsultation?.(saved);
+    setForm({ service: "", building: "", size: "", date: "", name: profile.name || form.name, phone: profile.phone || form.phone, address: "", memo: "" });
+    alert("견적 신청이 완료되었습니다.");
+  }
+
+  return (
+    <section className="min-h-screen bg-slate-950 text-slate-900">
+      <div className="mx-auto min-h-screen max-w-md bg-slate-50 shadow-2xl">
+        <div className="sticky top-0 z-40 border-b border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
+          <div className="flex items-center justify-between">
+            <button onClick={() => setPage("home")}><Logo /></button>
+            <a href={"tel:" + PHONE} className="rounded-full bg-blue-50 px-3 py-2 text-sm font-black text-blue-700">☎ 전화</a>
+          </div>
+        </div>
+
+        <div className="px-5 py-6">
+          <div className="rounded-[2rem] bg-gradient-to-br from-blue-600 to-blue-400 p-6 text-white shadow-xl shadow-blue-200">
+            <p className="text-sm font-bold text-blue-100">WithClean Customer App</p>
+            <h1 className="mt-3 text-3xl font-black leading-tight">위드크린<br />고객앱</h1>
+            <p className="mt-3 text-sm text-blue-50">로그인하고 견적 신청과 신청 내역을 바로 확인하세요.</p>
+          </div>
+
+          {notice && <div className="mt-4 rounded-2xl bg-orange-50 p-4 text-sm font-bold text-orange-700">{notice}</div>}
+
+          {!user ? (
+            <div className="mt-5 rounded-[2rem] bg-white p-5 shadow-sm">
+              <h2 className="text-xl font-black">간편 로그인</h2>
+              <p className="mt-2 text-sm text-slate-500">카카오톡 또는 구글 계정으로 로그인 후 신청할 수 있습니다.</p>
+              <div className="mt-5 grid gap-3">
+                <button onClick={() => signIn("kakao")} className="rounded-2xl bg-yellow-300 px-5 py-4 font-black text-slate-950">카카오톡으로 시작하기</button>
+                <button onClick={() => signIn("google")} className="rounded-2xl border border-slate-200 bg-white px-5 py-4 font-black text-slate-800">Google로 시작하기</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="mt-5 flex items-center justify-between rounded-[2rem] bg-white p-5 shadow-sm">
+                <div>
+                  <p className="text-xs font-bold text-slate-400">로그인 계정</p>
+                  <p className="mt-1 font-black">{profile.name || user.email || "고객님"}</p>
+                  <p className="text-xs text-slate-500">{user.email}</p>
+                </div>
+                <button onClick={signOut} className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-slate-600">로그아웃</button>
+              </div>
+
+              <form onSubmit={handleSubmit} className="mt-5 rounded-[2rem] bg-white p-5 shadow-sm">
+                <h2 className="text-xl font-black">무료 견적 신청</h2>
+                <p className="mt-2 text-sm text-slate-500">필수 항목을 입력하면 상담 관리로 바로 접수됩니다.</p>
+                <div className="mt-5 grid gap-3">
+                  <Select value={form.service} onChange={(e) => setForm({ ...form, service: e.target.value })}>
+                    <option value="">서비스 종류 *</option>
+                    {services.map((service) => <option key={service.slug}>{service.title}</option>)}
+                  </Select>
+                  <Select value={form.building} onChange={(e) => setForm({ ...form, building: e.target.value })}>
+                    <option value="">건물 유형 *</option>
+                    {BUILDING_TYPES.map((value) => <option key={value}>{value}</option>)}
+                  </Select>
+                  <Input placeholder="분양 평수 *" value={form.size} onChange={(e) => setForm({ ...form, size: e.target.value })} />
+                  <label className="grid gap-2 text-sm font-bold text-slate-700">청소희망날짜 *<Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></label>
+                  <Input placeholder="성함 *" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+                  <Input placeholder="연락처 *" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+                  <Input placeholder="주소 *" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+                  <Textarea placeholder="추가 요청사항" value={form.memo} onChange={(e) => setForm({ ...form, memo: e.target.value })} />
+                  <button disabled={loading} className="rounded-2xl bg-blue-600 px-5 py-4 font-black text-white disabled:opacity-60">{loading ? "저장 중..." : "견적 신청하기"}</button>
+                </div>
+              </form>
+
+              <div className="mt-5 rounded-[2rem] bg-white p-5 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xl font-black">내 신청 내역</h2>
+                  <button onClick={() => loadMyRows()} className="rounded-xl bg-blue-50 px-3 py-2 text-xs font-black text-blue-700">새로고침</button>
+                </div>
+                <div className="mt-4 grid gap-3">
+                  {myRows.length === 0 && <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">아직 신청 내역이 없습니다.</div>}
+                  {myRows.map((row) => (
+                    <div key={row.id} className="rounded-2xl border border-slate-100 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-black">{row.service}</p>
+                          <p className="mt-1 text-sm text-slate-500">{row.date || "날짜 미정"} · {row.address}</p>
+                        </div>
+                        <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-black text-blue-700">{row.status}</span>
+                      </div>
+                      <div className="mt-3 grid gap-1 text-xs text-slate-500">
+                        <p>배정 팀장: <b className="text-slate-700">{row.leader || "미배정"}</b></p>
+                        <p>신청내용: {row.memo || "-"}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function AdminLogin({ accounts, onLogin }) { const [login, setLogin] = useState({ username: "", password: "" }); const [loading, setLoading] = useState(false); async function handleLogin(e) { e.preventDefault(); setLoading(true); let account = null; if (supabase) { const { data, error } = await supabase.from("admin_accounts").select("*").eq("username", login.username).eq("password", login.password).maybeSingle(); if (!error && data) account = toAdminAccount(data); } if (!account) account = accounts.find((item) => item.username === login.username && item.password === login.password); setLoading(false); if (account) onLogin(account); else alert("아이디 또는 비밀번호가 올바르지 않습니다."); } return <section className="grid min-h-screen place-items-center bg-slate-100 px-5"><form onSubmit={handleLogin} className="w-full max-w-sm rounded-[2rem] bg-white p-8 shadow-xl"><h1 className="text-2xl font-black">관리자 로그인</h1><p className="mt-2 text-sm text-slate-500">권한별 관리자 계정으로 로그인하세요.</p><Input placeholder="아이디" value={login.username} onChange={(e) => setLogin({ ...login, username: e.target.value })} className="mt-6" /><Input type="password" placeholder="비밀번호" value={login.password} onChange={(e) => setLogin({ ...login, password: e.target.value })} className="mt-3" /><button disabled={loading} className="mt-4 w-full rounded-2xl bg-blue-600 px-5 py-3 font-black text-white disabled:opacity-60">{loading ? "확인 중..." : "로그인"}</button><div className="mt-4 rounded-2xl bg-slate-50 p-4 text-xs text-slate-500">기본 계정: master / 관리자 비밀번호, manager / manager1234, leader / leader1234</div></form></section>; }
 
 export default function App() {
+  const initialPage = typeof window !== "undefined" && window.location.pathname.startsWith("/app") ? "customer-app" : "home";
   const [currentAdmin, setCurrentAdmin] = useState(null);
-  const [page, setPage] = useState("home");
+  const [page, setPage] = useState(initialPage);
   const [selectedServiceSlug, setSelectedServiceSlug] = useState("move-in");
   const [services, setServices] = useState(initialServices);
   const [consultations, setConsultations] = useState(initialConsultations);
@@ -410,5 +616,8 @@ export default function App() {
   useEffect(() => { loadDb(); }, []);
   const addConsultation = (consultation) => setConsultations((prev) => [consultation, ...prev]);
 
-  return <main className="min-h-screen bg-white text-slate-900"><Header setPage={setPage} />{dbNotice && <div className="bg-orange-50 px-5 py-3 text-center text-sm font-bold text-orange-700">DB 알림: {dbNotice}</div>}{page === "home" && <HomePage setPage={setPage} services={services} reviews={reviewRows} onAddConsultation={addConsultation} setSelectedServiceSlug={setSelectedServiceSlug} />}{page === "services" && <ServicesPage setPage={setPage} services={services} reviews={reviewRows} onAddConsultation={addConsultation} initialSelectedSlug={selectedServiceSlug} />}{page === "admin" && (currentAdmin ? <AdminPage currentAdmin={currentAdmin} rows={consultations} setRows={setConsultations} leaderRows={leaderRows} setLeaderRows={setLeaderRows} reviews={reviewRows} setReviews={setReviewRows} services={services} setServices={setServices} accounts={adminAccounts} setAccounts={setAdminAccounts} onLogout={() => setCurrentAdmin(null)} /> : <AdminLogin accounts={adminAccounts} onLogin={setCurrentAdmin} />)}{page !== "admin" && <Footer setPage={setPage} />}<a href={"tel:" + PHONE} className="fixed bottom-6 right-6 z-50 grid h-16 w-16 place-items-center rounded-full bg-blue-600 text-white shadow-2xl shadow-blue-300">☎</a><a href="#estimate" className="fixed bottom-24 right-6 z-50 grid h-16 w-16 place-items-center rounded-full bg-yellow-400 text-slate-950 shadow-2xl">💬</a></main>;
+  const isCustomerApp = page === "customer-app";
+  const isAdminPage = page === "admin";
+
+  return <main className="min-h-screen bg-white text-slate-900">{!isCustomerApp && <Header setPage={setPage} />}{dbNotice && !isCustomerApp && <div className="bg-orange-50 px-5 py-3 text-center text-sm font-bold text-orange-700">DB 알림: {dbNotice}</div>}{page === "customer-app" && <CustomerAppPage services={services} onAddConsultation={addConsultation} setPage={setPage} />}{page === "home" && <HomePage setPage={setPage} services={services} reviews={reviewRows} onAddConsultation={addConsultation} setSelectedServiceSlug={setSelectedServiceSlug} />}{page === "services" && <ServicesPage setPage={setPage} services={services} reviews={reviewRows} onAddConsultation={addConsultation} initialSelectedSlug={selectedServiceSlug} />}{page === "admin" && (currentAdmin ? <AdminPage currentAdmin={currentAdmin} rows={consultations} setRows={setConsultations} leaderRows={leaderRows} setLeaderRows={setLeaderRows} reviews={reviewRows} setReviews={setReviewRows} services={services} setServices={setServices} accounts={adminAccounts} setAccounts={setAdminAccounts} onLogout={() => setCurrentAdmin(null)} /> : <AdminLogin accounts={adminAccounts} onLogin={setCurrentAdmin} />)}{!isAdminPage && !isCustomerApp && <Footer setPage={setPage} />}{!isAdminPage && !isCustomerApp && <a href={"tel:" + PHONE} className="fixed bottom-6 right-6 z-50 grid h-16 w-16 place-items-center rounded-full bg-blue-600 text-white shadow-2xl shadow-blue-300">☎</a>}{!isAdminPage && !isCustomerApp && <a href="#estimate" className="fixed bottom-24 right-6 z-50 grid h-16 w-16 place-items-center rounded-full bg-yellow-400 text-slate-950 shadow-2xl">💬</a>}</main>;
 }
